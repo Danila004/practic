@@ -1,0 +1,353 @@
+openapi: 3.0.3
+info:
+  title: Climbing Gym Booking API
+  description: |
+    API для мобильного приложения скалодрома. 
+    Обеспечивает автоматизацию записи на групповые тренировки (BR-01, BR-02), 
+    управление расписанием, прокатом снаряжения и обратной связью.
+  version: 1.0.0
+  contact:
+    name: Backend Team
+
+servers:
+  - url: https://api.climbing-gym.ru/v1
+    description: Production server
+  - url: http://localhost:8080/v1
+    description: Local development server
+
+tags:
+  - name: Schedule
+    description: Просмотр расписания и слотов (UC-01, US-01, US-02, US-03)
+  - name: Bookings
+    description: Создание, просмотр и отмена броней (UC-02, UC-03, US-04, US-07, US-08)
+  - name: Equipment
+    description: Информация о снаряжении для проката (UC-02, US-05, US-06)
+  - name: Ratings
+    description: Оценка инструкторов после тренировки (UC-04, US-10)
+  - name: Notifications
+    description: Push-уведомления и системные сообщения (UC-05, UC-06, US-11, US-13)
+
+paths:
+  /slots:
+    get:
+      tags: [Schedule]
+      summary: Получить список слотов на ближайшие дни (UC-01)
+      description: |
+        Возвращает список доступных слотов. 
+        Если слотов нет, возвращает пустой массив (для отображения empty state, US-14).
+      parameters:
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Начало периода (по умолчанию сегодня)
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Конец периода (по умолчанию +7 дней)
+        - name: zone_id
+          in: query
+          schema:
+            type: integer
+          description: Фильтр по зоне/формату
+      responses:
+        '200':
+          description: Список слотов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Slot'
+        '500':
+          description: Ошибка API (Альтернативный поток UC-01)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /equipment:
+    get:
+      tags: [Equipment]
+      summary: Получить доступное снаряжение и цены (UC-02, US-06)
+      responses:
+        '200':
+          description: Список снаряжения
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Equipment'
+
+  /bookings:
+    post:
+      tags: [Bookings]
+      summary: Записаться на тренировку (UC-02)
+      description: |
+        Создает бронь. Проверяет наличие мест (BR-04) и снаряжения (FR-07).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingCreateRequest'
+      responses:
+        '201':
+          description: Успешная запись
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '409':
+          description: Ошибка бронирования (Альтернативные потоки UC-02)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                no_spots:
+                  summary: Места закончились
+                  value:
+                    code: "SLOT_FULL"
+                    message: "К сожалению, все места заняты. Выберите другой слот"
+                no_equipment:
+                  summary: Нет снаряжения
+                  value:
+                    code: "NO_EQUIPMENT_AVAILABLE"
+                    message: "Снаряжения для проката нет"
+    get:
+      tags: [Bookings]
+      summary: Получить список моих записей (UC-03, US-12)
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, cancelled_by_client, cancelled_by_gym, completed]
+      responses:
+        '200':
+          description: Список броней
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Booking'
+
+  /bookings/{booking_id}:
+    get:
+      tags: [Bookings]
+      summary: Получить детали брони
+      parameters:
+        - name: booking_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Детали брони
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '404':
+          description: Бронь не найдена
+
+  /bookings/{booking_id}/cancel:
+    post:
+      tags: [Bookings]
+      summary: Отменить запись (UC-03)
+      description: |
+        Отменяет бронь. Если до начала < 10 минут, требует подтверждения (is_late_cancellation).
+      parameters:
+        - name: booking_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirm_late_cancellation:
+                  type: boolean
+                  description: Подтверждение поздней отмены (если применимо)
+      responses:
+        '200':
+          description: Запись успешно отменена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '409':
+          description: Требуется подтверждение поздней отмены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: "LATE_CANCELLATION_WARNING"
+                message: "Отмена менее чем за 10 минут до начала считается поздней. Пожалуйста, подтвердите отмену"
+
+  /bookings/{booking_id}/rating:
+    post:
+      tags: [Ratings]
+      summary: Оценить инструктора (UC-04)
+      parameters:
+        - name: booking_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RatingCreateRequest'
+      responses:
+        '201':
+          description: Оценка сохранена
+        '400':
+          description: Тренировка еще не завершена или оценка уже оставлена
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: Получить уведомления клиента (UC-05, UC-06)
+      responses:
+        '200':
+          description: Список уведомлений
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Slot:
+      type: object
+      properties:
+        slot_id:
+          type: integer
+        zone:
+          $ref: '#/components/schemas/ZoneInfo'
+        instructor:
+          $ref: '#/components/schemas/InstructorInfo'
+        start_datetime:
+          type: string
+          format: date-time
+        duration_minutes:
+          type: integer
+        status:
+          type: string
+          enum: [active, cancelled_by_gym, completed]
+        available_spots:
+          type: integer
+          description: Количество свободных мест (с учетом лимитов BR-04)
+        cancellation_reason:
+          type: string
+          description: Причина отмены скалодромом (FR-13)
+
+    ZoneInfo:
+      type: object
+      properties:
+        zone_id: { type: integer }
+        name: { type: string }
+        level: { type: string, enum: [beginner, advanced] }
+        capacity: { type: integer }
+
+    InstructorInfo:
+      type: object
+      properties:
+        instructor_id: { type: integer }
+        full_name: { type: string }
+        average_rating: { type: number, format: float }
+
+    Equipment:
+      type: object
+      properties:
+        equipment_id: { type: integer }
+        type: { type: string, enum: [shoes, harness] }
+        rental_price: { type: number, format: float }
+        available_count: { type: integer }
+
+    BookingCreateRequest:
+      type: object
+      required: [slot_id, equipment_option]
+      properties:
+        slot_id:
+          type: integer
+        equipment_option:
+          type: string
+          enum: [own, rental]
+          description: Опция снаряжения (FR-05)
+
+    Booking:
+      type: object
+      properties:
+        booking_id: { type: integer }
+        slot:
+          $ref: '#/components/schemas/Slot'
+        status:
+          type: string
+          enum: [active, cancelled_by_client, cancelled_by_gym, completed]
+        equipment_option:
+          type: string
+          enum: [own, rental]
+        is_late_cancellation:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        cancelled_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    RatingCreateRequest:
+      type: object
+      required: [stars]
+      properties:
+        stars:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: string
+          maxLength: 500
+
+    Notification:
+      type: object
+      properties:
+        notification_id: { type: integer }
+        type: { type: string, enum: [cancellation, reminder] }
+        title: { type: string }
+        message: { type: string }
+        booking_id: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Машинное имя ошибки для обработки на фронтенде
+        message:
+          type: string
+          description: Человекочитаемое сообщение для UI
